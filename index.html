@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f6f4ef">
+  <title>한붓그리기 퍼즐</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>한붓그리기 <span>오일러 경로 퍼즐</span></h1>
+  </header>
+
+  <main>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" role="tab" data-cat="possible">
+        <span class="dot ok"></span>가능한 그림 <small>6</small>
+      </button>
+      <button class="tab" role="tab" data-cat="impossible">
+        <span class="dot bad"></span>불가능한 그림 <small>6</small>
+      </button>
+    </nav>
+    <p class="cat-desc" id="catDesc"></p>
+
+    <div class="picker" id="picker"></div>
+
+    <section class="game">
+      <div class="board-wrap">
+        <svg id="board" viewBox="-6 -6 112 112" aria-label="퍼즐 판"></svg>
+        <div class="status" id="status" role="status"></div>
+      </div>
+
+      <aside class="side">
+        <div class="title-row">
+          <h2 id="pzName"></h2>
+          <span class="tag" id="pzTag"></span>
+        </div>
+        <p class="pz-desc" id="pzDesc"></p>
+
+        <div class="stats">
+          <div><b id="stEdges">0/0</b><span>그린 선</span></div>
+          <div><b id="stStrokes">0</b><span>획 수</span></div>
+          <div><b id="stGoal">1</b><span>목표 획</span></div>
+        </div>
+
+        <div class="btns">
+          <button id="btnUndo" type="button">↶ 되돌리기</button>
+          <button id="btnReset" type="button">⟲ 처음부터</button>
+          <button id="btnHint" type="button">◉ 차수 보기</button>
+          <button id="btnAnalyze" type="button">∑ 오일러 판정</button>
+          <button id="btnSolve" type="button" class="wide">▶ 풀이 보기</button>
+        </div>
+
+        <div class="analysis" id="analysis" hidden></div>
+
+        <p class="howto">
+          점을 누른 채 이웃한 점으로 <b>드래그</b>하거나, 점을 차례로 <b>탭</b>하세요.
+          같은 선은 두 번 지날 수 없어요. 다른 점을 누르면 붓을 떼고 <b>새 획</b>을 시작합니다.
+        </p>
+      </aside>
+    </section>
+
+    <details class="theory">
+      <summary>오일러 정리 한눈에 보기</summary>
+      <div class="theory-body">
+        <p><b>차수</b>: 한 점에 연결된 선의 개수. 차수가 홀수인 점을 <b>홀수점</b>이라고 합니다.</p>
+        <ul>
+          <li><span class="pill ok">홀수점 0개</span> 오일러 <b>회로</b> — 어느 점에서 시작해도 되고, 출발점으로 돌아옵니다.</li>
+          <li><span class="pill ok">홀수점 2개</span> 오일러 <b>경로</b> — 한 홀수점에서 출발해 다른 홀수점에서 끝납니다.</li>
+          <li><span class="pill bad">홀수점 2k개 (k≥2)</span> 한붓그리기 불가능 — 최소 <b>k획</b>이 필요합니다.</li>
+        </ul>
+        <p><b>왜?</b> 그리는 도중 어떤 점을 지나가면 "들어오는 선 + 나가는 선"으로 선이 2개씩 쓰입니다.
+          그래서 중간에 지나가는 점은 차수가 짝수여야 하고, 홀수 차수가 허용되는 점은 <b>시작점과 끝점</b>뿐입니다.
+          한 획은 홀수점을 최대 2개만 해결할 수 있으니, 홀수점이 2k개면 k획이 필요합니다.</p>
+        <p class="muted">1736년 오일러가 쾨니히스베르크의 7개 다리 문제를 풀면서 이 원리를 증명했고, 이것이 그래프 이론의 시작이 되었습니다.</p>
+      </div>
+    </details>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
