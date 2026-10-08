@@ -81,7 +81,7 @@
       {
         name: '삼각 별',
         desc: '삼각형 안에 거꾸로 된 삼각형 (정팔면체 그래프).',
-        nodes: [[50, 4], [96, 88], [4, 88], [50, 74], [29, 38], [71, 38]],
+        nodes: [[50, 4], [96, 88], [4, 88], [50, 69], [38, 48], [62, 48]],
         edges: [[0, 1], [1, 2], [2, 0], [3, 4], [4, 5], [5, 3], [0, 4], [0, 5], [1, 5], [1, 3], [2, 3], [2, 4]],
       },
     ],
@@ -131,7 +131,7 @@
 
   const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   const INK = ['#e8590c', '#1971c2', '#2f9e44', '#9c36b5', '#c2255c', '#0c8599'];
-  const CURVE = 24; // 같은 두 점을 잇는 여러 선(다리)의 휘어짐 정도
+  const CURVE = 34; // 같은 두 점을 잇는 여러 선(다리)의 휘어짐 정도
   const svgNS = 'http://www.w3.org/2000/svg';
 
   /* =========================================================
@@ -234,6 +234,7 @@
       pz.cat = cat;
       pz.info = analyze(pz);
       pz.offsets = edgeOffsets(pz);
+      pz.samples = pz.edges.map((_, ei) => sampleEdge(pz, ei));
     });
   });
 
@@ -248,6 +249,12 @@
     showAnalysis: false,
     done: false,
     dragging: false,
+    trail: [],      // 마지막 점을 떠난 뒤 드래그한 좌표들 (어느 선을 따라갔는지 판단)
+    lastPt: null,
+    pending: null,  // 새 획 확인을 기다리는 점
+    preview: null,  // 손이 따라가고 있는 선과 진행 비율 {ei, frac}
+    penUp: false,   // "붓 떼기"를 누른 상태
+    hover: -1,
     auto: false,
     timer: null,
   };
@@ -261,7 +268,7 @@
   const statusEl = $('status');
   const analysisEl = $('analysis');
 
-  let gBase, gInk, gNodes, band, nodeEls = [];
+  let gBase, gInk, gNodes, pen, preview, nodeEls = [];
 
   function svgEl(tag, attrs, parent) {
     const e = document.createElementNS(svgNS, tag);
@@ -298,6 +305,35 @@
     return `M${s[0]} ${s[1]}Q${r2(cx)} ${r2(cy)} ${t[0]} ${t[1]}`;
   }
 
+  // 선(직선/곡선)을 점 목록으로 근사 — 터치 위치가 어느 선에 가까운지 계산할 때 사용
+  function sampleEdge(pz, i) {
+    const [a, b] = pz.edges[i];
+    const P = pz.nodes[Math.min(a, b)], Q = pz.nodes[Math.max(a, b)];
+    const off = pz.offsets[i];
+    if (!off) return [P, Q];
+    const dx = Q[0] - P[0], dy = Q[1] - P[1], L = Math.hypot(dx, dy);
+    const C = [(P[0] + Q[0]) / 2 + (-dy / L) * off, (P[1] + Q[1]) / 2 + (dx / L) * off];
+    const pts = [];
+    for (let k = 0; k <= 24; k++) {
+      const t = k / 24, u = 1 - t;
+      pts.push([u * u * P[0] + 2 * u * t * C[0] + t * t * Q[0], u * u * P[1] + 2 * u * t * C[1] + t * t * Q[1]]);
+    }
+    return pts;
+  }
+
+  function distToEdge(p, ei) {
+    const pts = state.pz.samples[ei];
+    let best = Infinity;
+    for (let k = 0; k + 1 < pts.length; k++) {
+      const [x1, y1] = pts[k], [x2, y2] = pts[k + 1];
+      const dx = x2 - x1, dy = y2 - y1;
+      const len2 = dx * dx + dy * dy || 1;
+      const t = Math.max(0, Math.min(1, ((p.x - x1) * dx + (p.y - y1) * dy) / len2));
+      best = Math.min(best, Math.hypot(p.x - (x1 + t * dx), p.y - (y1 + t * dy)));
+    }
+    return best;
+  }
+
   /* ---------- 퍼즐 선택 카드 ---------- */
   function renderPicker() {
     picker.innerHTML = '';
@@ -326,7 +362,8 @@
     board.innerHTML = '';
     gBase = svgEl('g', {}, board);
     gInk = svgEl('g', {}, board);
-    band = svgEl('line', { class: 'band', visibility: 'hidden' }, board);
+    preview = svgEl('path', { class: 'preview', visibility: 'hidden' }, board);
+    pen = svgEl('polyline', { class: 'pen', visibility: 'hidden' }, board);
     gNodes = svgEl('g', {}, board);
 
     pz.edges.forEach((_, i) => svgEl('path', { d: edgeD(pz, i), class: 'edge' }, gBase));
@@ -373,6 +410,8 @@
     state.strokes = [];
     state.inks = [];
     state.done = false;
+    state.trail = [];
+    clearIntent();
     if (gInk) gInk.innerHTML = '';
     document.querySelector('.board-wrap').classList.remove('win');
     setStatus(state.cat === 'possible'
@@ -399,12 +438,18 @@
     return d;
   }
 
-  function findUnused(a, b) {
-    return state.pz.edges.findIndex(([x, y], i) =>
-      !state.used[i] && ((x === a && y === b) || (x === b && y === a)));
+  // a와 b 사이의 아직 안 그린 선들 (같은 두 점을 잇는 선이 여러 개일 수 있음)
+  function unusedBetween(a, b) {
+    const out = [];
+    state.pz.edges.forEach(([x, y], i) => {
+      if (!state.used[i] && ((x === a && y === b) || (x === b && y === a))) out.push(i);
+    });
+    return out;
   }
 
   function startStroke(v) {
+    state.trail = [];
+    clearIntent();
     if (remainingDeg(v) === 0) {
       setStatus(`${LETTERS[v]} 점에는 더 그릴 선이 남아 있지 않아요.`, 'warn');
       return false;
@@ -418,17 +463,22 @@
         setStatus(`붓을 떼고 ${LETTERS[v]}에서 ${state.strokes.length}번째 획을 시작했어요.`, state.cat === 'possible' ? 'warn' : '');
       }
     }
-    if (state.strokes.length === 1 && !state.auto) setStatus(`${LETTERS[v]}에서 출발! 이웃한 점으로 이어 그리세요.`);
+    if (state.strokes.length === 1 && !state.auto) setStatus(`${LETTERS[v]}에서 출발! 누른 채로 선을 따라 이웃한 점까지 드래그하세요.`);
     refresh();
     return true;
   }
 
   function traverse(from, to, ei) {
     const s = curStroke();
+    state.trail = [];
+    clearIntent();
     state.used[ei] = true;
     s.edges.push(ei);
     s.nodes.push(to);
-    drawInk(ei, from, state.strokes.length - 1);
+    // 손으로 이미 칠한 만큼은 이어서 그린다
+    const startFrac = state.preview && state.preview.ei === ei ? state.preview.frac : 0;
+    hidePen();
+    drawInk(ei, from, state.strokes.length - 1, startFrac);
     refresh();
 
     if (usedCount() === state.pz.edges.length) {
@@ -439,14 +489,14 @@
       } else if (state.cat === 'possible') {
         setStatus(`막혔어요! 남은 선 ${state.pz.edges.length - usedCount()}개. 되돌리기를 하거나 출발점을 바꿔 보세요.`, 'warn');
       } else {
-        setStatus(`이 획은 끝! 남은 선 ${state.pz.edges.length - usedCount()}개 — 다른 점을 눌러 다음 획을 시작하세요.`);
+        setStatus(`이 획은 끝! 남은 선 ${state.pz.edges.length - usedCount()}개 — 시작할 점을 눌러 다음 획을 그리세요.`);
       }
     } else if (!state.auto) {
       setStatus(`${s.nodes.map((v) => LETTERS[v]).join(' → ')}`);
     }
   }
 
-  function drawInk(ei, from, strokeIdx) {
+  function drawInk(ei, from, strokeIdx, startFrac = 0) {
     const p = svgEl('path', {
       d: edgeD(state.pz, ei, from),
       class: 'ink',
@@ -454,7 +504,7 @@
     }, gInk);
     const len = p.getTotalLength();
     p.style.strokeDasharray = len;
-    p.style.strokeDashoffset = len;
+    p.style.strokeDashoffset = len * (1 - startFrac);
     p.getBoundingClientRect(); // 리플로우로 트랜지션 시작
     p.style.strokeDashoffset = 0;
     state.inks.push(p);
@@ -465,6 +515,7 @@
     const s = curStroke();
     if (!s) return;
     state.done = false;
+    clearIntent();
     document.querySelector('.board-wrap').classList.remove('win');
     if (s.edges.length === 0) {
       state.strokes.pop();
@@ -579,7 +630,7 @@
     const end = currentEnd();
     const starts = new Set(state.strokes.map((s) => s.nodes[0]));
     nodeEls.forEach((g, i) => {
-      g.classList.toggle('current', i === end && !state.done);
+      g.classList.toggle('current', i === end && !state.done && !state.penUp);
       g.classList.toggle('start', starts.has(i));
       g.classList.toggle('spent', remainingDeg(i) === 0);
     });
@@ -591,6 +642,15 @@
 
     $('btnUndo').disabled = state.auto || state.strokes.length === 0;
     $('btnSolve').disabled = state.auto;
+    const cs = curStroke();
+    $('btnPen').disabled = state.auto || state.done || !cs || !cs.edges.length;
+    $('btnPen').classList.toggle('on', state.penUp);
+    // 전체화면 상단 바
+    $('fsTitle').textContent = `#${state.idx + 1} ${pz.name}`;
+    $('fsStats').textContent = `선 ${usedCount()}/${pz.edges.length} · ${strokeCount()}획`;
+    $('fsUndo').disabled = $('btnUndo').disabled;
+    $('fsPen').disabled = $('btnPen').disabled;
+    $('fsPen').classList.toggle('on', state.penUp);
     $('btnHint').classList.toggle('on', state.showDeg);
     $('btnAnalyze').classList.toggle('on', state.showAnalysis);
     board.classList.toggle('show-deg', state.showDeg);
@@ -635,10 +695,17 @@
   }
 
   // 화면 픽셀 기준 반경을 viewBox 단위로 변환 (손가락으로도 잘 잡히도록)
-  const pxToUnits = (px) => (px * 112) / board.getBoundingClientRect().width;
+  // (전체화면에서는 판이 정사각형이 아니므로 짧은 변 기준 — viewBox가 그 변에 맞춰짐)
+  const pxToUnits = (px) => {
+    const r = board.getBoundingClientRect();
+    return (px * 112) / (Math.min(r.width, r.height) || 1);
+  };
+
+  // 판이 작을 때 반경이 너무 커져서 옆 선 위의 점까지 잡히지 않도록 상한을 둔다
+  const clampUnits = (px, lo, hi) => Math.min(hi, Math.max(lo, pxToUnits(px)));
 
   function nearestNode(p, px) {
-    const lim = Math.max(pxToUnits(px), 5);
+    const lim = px >= 20 ? clampUnits(px, 5, 11) : clampUnits(px, 4.5, 7);
     let best = -1, bestD = Infinity;
     state.pz.nodes.forEach(([x, y], i) => {
       const d = Math.hypot(p.x - x, p.y - y);
@@ -647,58 +714,212 @@
     return best;
   }
 
-  function updateBand(p) {
+  // 지금 위치에서 나가는 남은 선 중, 손이 따라가고 있는 선
+  function followedEdge(cur) {
+    const trail = state.trail;
+    if (trail.length < 3) return -1;
+    let best = -1, bestD = Infinity;
+    state.pz.edges.forEach(([a, b], i) => {
+      if (state.used[i] || (a !== cur && b !== cur)) return;
+      let sum = 0;
+      trail.forEach((q) => { sum += distToEdge(q, i); });
+      const m = sum / trail.length;
+      if (m < bestD) { bestD = m; best = i; }
+    });
+    return bestD <= clampUnits(28, 9, 12) ? best : -1;
+  }
+
+  // 선 위에서 손 위치까지 얼마나 왔는지 (0~1), from 쪽에서 잰 비율
+  function progressOnEdge(ei, from, p) {
+    const [a, b] = state.pz.edges[ei];
+    let pts = state.pz.samples[ei];
+    if (from !== Math.min(a, b)) pts = pts.slice().reverse(); // 샘플은 작은 번호 점에서 시작
+    const seg = [];
+    let total = 0;
+    for (let k = 0; k + 1 < pts.length; k++) {
+      const l = Math.hypot(pts[k + 1][0] - pts[k][0], pts[k + 1][1] - pts[k][1]);
+      seg.push(l);
+      total += l;
+    }
+    let bestD = Infinity, bestPos = 0, acc = 0;
+    for (let k = 0; k < seg.length; k++) {
+      const [x1, y1] = pts[k], [x2, y2] = pts[k + 1];
+      const dx = x2 - x1, dy = y2 - y1;
+      const t = Math.max(0, Math.min(1, ((p.x - x1) * dx + (p.y - y1) * dy) / (dx * dx + dy * dy || 1)));
+      const d = Math.hypot(p.x - (x1 + t * dx), p.y - (y1 + t * dy));
+      if (d < bestD) { bestD = d; bestPos = acc + t * seg[k]; }
+      acc += seg[k];
+    }
+    return total ? bestPos / total : 0;
+  }
+
+  function hidePen() {
+    state.preview = null;
+    if (pen) pen.setAttribute('visibility', 'hidden');
+    if (preview) preview.setAttribute('visibility', 'hidden');
+  }
+
+  // 펜처럼: 손이 지나간 자국을 그리고, 따라가고 있는 선은 손 위치까지 미리 칠한다
+  function updatePen(p) {
     const end = currentEnd();
-    if (!state.dragging || end === null || state.done) {
-      band.setAttribute('visibility', 'hidden');
+    if (!p || !state.dragging || end === null || state.done || state.penUp) { hidePen(); return; }
+    const color = INK[(state.strokes.length - 1) % INK.length];
+
+    const [x, y] = state.pz.nodes[end];
+    const pts = [[x, y]];
+    state.trail.forEach((q, i) => { if (i % 2 === 0) pts.push([q.x, q.y]); });
+    pts.push([p.x, p.y]);
+    pen.setAttribute('points', pts.map(([a, b]) => `${r2(a)},${r2(b)}`).join(' '));
+    pen.setAttribute('stroke', color);
+    pen.setAttribute('visibility', 'visible');
+
+    const ei = followedEdge(end);
+    if (ei < 0) {
+      state.preview = null;
+      preview.setAttribute('visibility', 'hidden');
       return;
     }
-    const [x, y] = state.pz.nodes[end];
-    band.setAttribute('x1', x);
-    band.setAttribute('y1', y);
-    band.setAttribute('x2', p.x);
-    band.setAttribute('y2', p.y);
-    band.setAttribute('visibility', 'visible');
+    const frac = progressOnEdge(ei, end, p);
+    preview.setAttribute('d', edgeD(state.pz, ei, end));
+    preview.setAttribute('stroke', color);
+    const L = preview.getTotalLength();
+    preview.style.strokeDasharray = `${frac * L} ${L}`;
+    preview.setAttribute('visibility', 'visible');
+    state.preview = { ei, frac };
+  }
+
+  function setPending(v) {
+    state.pending = v;
+    nodeEls.forEach((g, i) => g.classList.toggle('pending', i === v));
+  }
+
+  function clearIntent() {
+    state.penUp = false;
+    setPending(null);
+  }
+
+  // "붓 떼기": 지금 획을 끝내고, 다음에 누르는 점에서 새 획을 시작 (이웃한 점이어도)
+  function liftPen() {
+    const s = curStroke();
+    if (!s || !s.edges.length || state.done || state.auto) return;
+    const up = !state.penUp;
+    clearIntent();
+    state.penUp = up;
+    setStatus(up
+      ? '붓을 뗐어요. 새 획을 시작할 점을 누르세요.'
+      : `${LETTERS[currentEnd()]}에서 이어서 그리세요.`);
+    refresh();
+  }
+
+  // 지금 위치가 아닌 점을 눌렀을 때: 실수로 붓이 떼지지 않도록 한 번 더 눌러야 새 획 시작
+  function requestNewStroke(v, cur) {
+    if (remainingDeg(v) === 0) {
+      setStatus(`${LETTERS[v]} 점에는 더 그릴 선이 남아 있지 않아요.`, 'warn');
+      return false;
+    }
+    const s = curStroke();
+    if (s.edges.length === 0 || remainingDeg(cur) === 0 || state.pending === v) {
+      return startStroke(v);
+    }
+    setPending(v);
+    setStatus(`지금 위치는 ${LETTERS[cur]}예요. ${LETTERS[cur]}를 누른 채 선을 따라 드래그해서 이어 그리세요. ${LETTERS[v]}에서 새 획을 시작하려면 ${LETTERS[v]}를 한 번 더 누르세요.`, 'warn');
+    return false;
+  }
+
+  // 같은 두 점 사이에 선이 여러 개면, 드래그한 궤적과 가장 가까운 선을 고른다
+  function pickByTrail(cands) {
+    const trail = state.trail;
+    if (!trail.length) return cands[0];
+    let best = -1, bestD = Infinity;
+    cands.forEach((ei) => {
+      let sum = 0;
+      trail.forEach((q) => { sum += distToEdge(q, ei); });
+      const m = sum / trail.length;
+      if (m < bestD) { bestD = m; best = ei; }
+    });
+    return bestD <= clampUnits(28, 9, 12) ? best : -1;
+  }
+
+  // 드래그 중 한 좌표를 처리: 이웃 점에 닿으면 선을 긋는다
+  function processPoint(q) {
+    const cur = currentEnd();
+    if (cur === null || state.done) return;
+    const v = nearestNode(q, 16);
+    if (v === cur) { state.trail = []; state.hover = cur; return; }
+    if (v < 0) { state.trail.push(q); state.hover = -1; return; }
+    if (v === state.hover) return; // 이미 처리한 점 위에 머무는 중
+    state.hover = v;
+    const cands = unusedBetween(cur, v);
+    if (!cands.length) {
+      setStatus(`${LETTERS[cur]}와 ${LETTERS[v]} 사이에는 그릴 수 있는 선이 없어요.`, 'warn');
+      return;
+    }
+    const ei = pickByTrail(cands);
+    if (ei < 0) {
+      setStatus(`선을 따라 그려 주세요. ${LETTERS[cur]}에서 ${LETTERS[v]}(으)로 가는 선과 그은 길이 맞지 않아요.`, 'warn');
+      return;
+    }
+    traverse(cur, v, ei);
+    state.hover = v;
   }
 
   board.addEventListener('pointerdown', (e) => {
     if (state.auto || state.done) return;
     const p = toSvg(e);
     const v = nearestNode(p, 24);
+    const cur = currentEnd();
     if (v < 0) return;
+
+    // 선은 드래그로만 긋는다. 점을 누르는 것은 시작점을 잡는 동작일 뿐 선을 잇지 않는다.
+    let grab = false;
+    if (state.penUp || cur === null) {
+      grab = startStroke(v);
+    } else if (v === cur) {
+      clearIntent();
+      grab = true;
+    } else {
+      grab = requestNewStroke(v, cur);
+    }
+    if (!grab) return;
+
     e.preventDefault();
     try { board.setPointerCapture(e.pointerId); } catch (_) { /* 무시 */ }
     state.dragging = true;
-
-    const cur = currentEnd();
-    if (cur === null) {
-      startStroke(v);
-    } else if (v !== cur) {
-      const ei = findUnused(cur, v);
-      if (ei >= 0) traverse(cur, v, ei); // 탭으로 이어 그리기
-      else startStroke(v);               // 붓 떼고 새 획
-    }
-    updateBand(p);
+    state.lastPt = p;
+    state.trail = [];
+    state.hover = currentEnd();
+    updatePen(p);
   });
 
   board.addEventListener('pointermove', (e) => {
     if (!state.dragging || state.auto || state.done) return;
     e.preventDefault();
-    const p = toSvg(e);
-    const cur = currentEnd();
-    if (cur !== null) {
-      const v = nearestNode(p, 18);
-      if (v >= 0 && v !== cur) {
-        const ei = findUnused(cur, v);
-        if (ei >= 0) traverse(cur, v, ei);
+    const evs = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [];
+    let p = null;
+    for (const ev of (evs.length ? evs : [e])) {
+      p = toSvg(ev);
+      // 빠르게 그어도 중간 점을 건너뛰지 않도록 1단위 간격으로 보간
+      const a = state.lastPt || p;
+      const n = Math.max(1, Math.ceil(Math.hypot(p.x - a.x, p.y - a.y)));
+      for (let k = 1; k <= n && !state.done; k++) {
+        processPoint({ x: a.x + ((p.x - a.x) * k) / n, y: a.y + ((p.y - a.y) * k) / n });
       }
+      state.lastPt = p;
+      if (state.done) break;
     }
-    updateBand(p);
+    updatePen(p);
   });
 
   const endDrag = () => {
+    // 점에 닿기 전에 손을 떼면 그 선은 그려지지 않는다 — 이유를 알려 준다
+    const cur = currentEnd();
+    if (state.dragging && state.preview && !state.done && cur !== null) {
+      setStatus(`선은 다음 점까지 닿아야 그려져요. ${LETTERS[cur]}를 다시 누르고 이어서 드래그하세요.`, 'warn');
+    }
     state.dragging = false;
-    if (band) band.setAttribute('visibility', 'hidden');
+    state.lastPt = null;
+    state.trail = [];
+    hidePen();
   };
   board.addEventListener('pointerup', endDrag);
   board.addEventListener('pointercancel', endDrag);
@@ -712,6 +933,53 @@
   $('btnHint').addEventListener('click', () => { state.showDeg = !state.showDeg; refresh(); });
   $('btnAnalyze').addEventListener('click', () => { state.showAnalysis = !state.showAnalysis; refresh(); });
   $('btnSolve').addEventListener('click', playSolution);
+  $('btnPen').addEventListener('click', liftPen);
+  $('fsUndo').addEventListener('click', undo);
+  $('fsPen').addEventListener('click', liftPen);
+
+  /* ---------- 전체화면 ----------
+   * 브라우저 전체화면 API를 쓰고, 지원하지 않는 기기(아이폰 사파리 등)는
+   * CSS로 판을 화면 가득 채우는 방식으로 대신한다. */
+  const wrap = $('boardWrap');
+  const nativeFs = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+
+  function setFsClass(on) {
+    wrap.classList.toggle('fs', on);
+    document.body.classList.toggle('fs-lock', on);
+    const label = on ? '전체화면 닫기' : '전체화면';
+    $('btnFull').setAttribute('aria-label', label);
+    $('btnFull').title = label;
+  }
+
+  function toggleFull() {
+    if (!wrap.classList.contains('fs')) {
+      setFsClass(true);
+      const req = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
+      if (req) {
+        try {
+          const r = req.call(wrap);
+          if (r && typeof r.catch === 'function') r.catch(() => { /* CSS 전체화면으로 유지 */ });
+        } catch (_) { /* CSS 전체화면으로 유지 */ }
+      }
+    } else {
+      if (nativeFs()) {
+        const exit = document.exitFullscreen || document.webkitExitFullscreen;
+        try {
+          const r = exit.call(document);
+          if (r && typeof r.catch === 'function') r.catch(() => {});
+        } catch (_) { /* 무시 */ }
+      }
+      setFsClass(false);
+    }
+  }
+
+  $('btnFull').addEventListener('click', toggleFull);
+  // Esc 등으로 브라우저 전체화면이 풀리면 화면도 원래대로
+  ['fullscreenchange', 'webkitfullscreenchange'].forEach((ev) =>
+    document.addEventListener(ev, () => { if (!nativeFs()) setFsClass(false); }));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && wrap.classList.contains('fs') && !nativeFs()) setFsClass(false);
+  });
 
   loadPuzzle('possible', 0);
 })();
